@@ -1,0 +1,44 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache / artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Project runtime data
+db_storage/
+chroma/
+
+# Profiling outputs
+profile.txt
+profile.json
+pyinstrument_report.html
+pyinstrument.txt
+
+# Env / secrets
+.env
+.env.*
+!*.env.example
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+

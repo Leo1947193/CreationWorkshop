@@ -1,0 +1,24 @@
+[project]
+name = "creative-workshop-experiment"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain==0.3.*",
+    "langgraph==0.3.*",
+    "langchain_core>=0.3,<0.4",
+    "langchain_community>=0.3,<0.4",
+    "langchain_google_genai",
+    "langchain-openai",
+    "fastapi==0.111.*",
+    "uvicorn[standard]==0.30.*",
+    "pydantic",
+    "chromadb==0.5.*",
+    "sentence-transformers",
+    "langchain-tavily",
+    "cohere",
+    "beautifulsoup4",
+    "numpy",
+    "python-dotenv"
+]
+
+[tool.uv]
