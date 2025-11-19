@@ -99,8 +99,8 @@ Key files and directories:
 ### 1. Clone and create a virtual environment
 
 ```bash
-git clone https://github.com/yourname/creative-workshop.git
-cd creative-workshop   # your actual repo path
+git clone https://github.com/Leo1947193/CreationWorkshop.git
+cd CreationWorkshop   # your actual repo path
 
 uv venv .venv
 source .venv/bin/activate
