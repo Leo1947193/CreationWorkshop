@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from src.core.schemas import DefectReport, GlobalState
 from src.core.state_manager import load_state, save_state
 from src.modules.main_graph import execute_main_graph
+from src.modules.see_agent_v2 import SEE_GRAPH_V2
 
 
 class SessionInitResponse(BaseModel):
@@ -63,6 +64,14 @@ async def session_init() -> SessionInitResponse:
     return SessionInitResponse(session_id=session_id)
 
 
+def _coerce_global_state(value: Any) -> GlobalState:
+    if isinstance(value, GlobalState):
+        return value
+    if isinstance(value, Mapping):
+        return GlobalState(**dict(value))
+    raise HTTPException(status_code=500, detail=f"Unexpected state type: {type(value)!r}")
+
+
 def _ensure_session_state(session_id: str) -> GlobalState:
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -77,6 +86,32 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     state.next_module_to_call = "SEE"
 
     updated_state = execute_main_graph(state)
+    save_state(updated_state)
+
+    ai_messages = []
+    for msg in updated_state.conversation_history:
+        if getattr(msg, "type", None) == "ai":
+            ai_messages.append(getattr(msg, "content", ""))
+        elif isinstance(msg, dict) and msg.get("type") == "ai":
+            ai_messages.append(msg.get("content", ""))
+    response_text = ai_messages[-1] if ai_messages else "（尚未生成 AI 回复）"
+
+    return ChatResponse(
+        session_id=request.session_id,
+        response=response_text,
+        conversation_length=len(updated_state.conversation_history),
+    )
+
+
+@app.post("/api/v1/chat_simple", response_model=ChatResponse)
+async def chat_simple_endpoint(request: ChatRequest) -> ChatResponse:
+    """Alternative SEE variant: LLM prompt only sees history + current input."""
+    state = _ensure_session_state(request.session_id)
+    state.current_user_input = request.message
+    state.socratic_question_needed = True
+
+    updated_state_raw = SEE_GRAPH_V2.invoke(state)
+    updated_state = _coerce_global_state(updated_state_raw)
     save_state(updated_state)
 
     ai_messages = []

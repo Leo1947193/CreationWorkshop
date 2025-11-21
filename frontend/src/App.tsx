@@ -133,21 +133,30 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [story, setStory] = useState<string | undefined>()
   const [topDefect, setTopDefect] = useState<DefectReport | undefined>()
+  const [seeVariant, setSeeVariant] = useState<"default" | "simple">("default")
   const [loading, setLoading] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      const res = await fetch(`${API_BASE}/api/v1/session/init`, { method: "POST" })
-      const data = await res.json()
-      setSessionId(data.session_id)
+  const initSession = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/api/v1/session/init`, { method: "POST" })
+    if (!res.ok) {
+      throw new Error("session init failed")
     }
-    bootstrap().catch((err) => {
+    const data = await res.json()
+    setSessionId(data.session_id)
+    // reset local buffers
+    setMessages([])
+    setStory(undefined)
+    setTopDefect(undefined)
+  }, [])
+
+  useEffect(() => {
+    initSession().catch((err) => {
       console.error(err)
       setError("无法初始化会话，请确认后端是否已启动。")
     })
-  }, [])
+  }, [initSession])
 
   const apiHeaders = useMemo(
     () => ({
@@ -162,7 +171,8 @@ function App() {
       setLoading(true)
       setError(null)
       try {
-        const res = await fetch(`${API_BASE}/api/v1/chat`, {
+        const endpoint = seeVariant === "simple" ? "/api/v1/chat_simple" : "/api/v1/chat"
+        const res = await fetch(`${API_BASE}${endpoint}`, {
           method: "POST",
           headers: apiHeaders,
           body: JSON.stringify({ session_id: sessionId, message }),
@@ -183,7 +193,7 @@ function App() {
         setLoading(false)
       }
     },
-    [apiHeaders, sessionId]
+    [apiHeaders, seeVariant, sessionId]
   )
 
   const handleAnalyze = useCallback(async () => {
@@ -218,6 +228,37 @@ function App() {
         <p className="mt-2 text-sm text-slate-500">
           与 SEE 对话来精炼你的世界，然后让 CDA + CDNG 揭示潜在缺陷，并以故事的形式呈现。
         </p>
+        <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-slate-100 p-1 text-xs text-slate-600">
+          <span className="px-2">SEE 版本</span>
+          <button
+            type="button"
+            onClick={() => setSeeVariant("default")}
+            className={`rounded-full px-3 py-1 ${
+              seeVariant === "default" ? "bg-white text-slate-900 shadow" : "text-slate-500"
+            }`}
+          >
+            标准（含空白/冲突分析）
+          </button>
+          <button
+            type="button"
+            onClick={() => setSeeVariant("simple")}
+            className={`rounded-full px-3 py-1 ${
+              seeVariant === "simple" ? "bg-white text-slate-900 shadow" : "text-slate-500"
+            }`}
+          >
+            简化（仅历史 + 当前输入）
+          </button>
+        </div>
+        <div className="mt-2 flex items-center gap-3 text-xs text-slate-500">
+          <span className="rounded-full bg-slate-100 px-3 py-1">Session: {sessionId || "未初始化"}</span>
+          <button
+            type="button"
+            onClick={initSession}
+            className="rounded-full bg-white px-3 py-1 text-blue-600 shadow-sm ring-1 ring-slate-200 hover:bg-blue-50"
+          >
+            新建会话
+          </button>
+        </div>
       </header>
 
       {error && <p className="rounded-2xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
@@ -237,4 +278,3 @@ function App() {
 }
 
 export default App
-

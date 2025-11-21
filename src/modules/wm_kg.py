@@ -17,6 +17,9 @@ from pydantic import BaseModel, Field
 from src.core.llm import get_llm_client
 
 os.environ.setdefault("CHROMADB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("CHROMADB_ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "0")
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL")
 if not EMBEDDING_MODEL_NAME:
     raise RuntimeError("EMBEDDING_MODEL must be provided via environment.")
@@ -25,6 +28,16 @@ try:
     import chromadb  # type: ignore
     from chromadb.config import Settings  # type: ignore
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
+    # Best-effort monkeypatch to silence flaky telemetry capture errors in some environments.
+    try:  # pragma: no cover - defensive patch
+        from chromadb.telemetry import posthog  # type: ignore
+
+        def _noop_capture(*args, **kwargs):
+            return None
+
+        posthog.capture = _noop_capture  # type: ignore
+    except Exception:
+        pass
 except ImportError:  # pragma: no cover
     chromadb = None
     SentenceTransformerEmbeddingFunction = None
@@ -177,8 +190,12 @@ class WorldModelKnowledgeGraph:
                     is_persistent=True,
                     persist_directory=str(self.persist_directory),
                 )
+            # Always pass explicit path to avoid writing to default ./chroma in newer Chroma versions.
             if client_settings:
-                self._client = chromadb.PersistentClient(settings=client_settings)
+                self._client = chromadb.PersistentClient(
+                    path=str(self.persist_directory),
+                    settings=client_settings,
+                )
             else:
                 self._client = chromadb.PersistentClient(path=str(self.persist_directory))
         embedding_fn = self._build_embedding_function()

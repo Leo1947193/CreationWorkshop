@@ -3,13 +3,17 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
+# Ensure .env is loaded so Tavily picks up the API key when running via REPL/scripts.
+load_dotenv()
+
 try:
-    from langchain_tavily import TavilySearchAPIRetriever
+    from langchain_tavily._utilities import TavilySearchAPIWrapper  # type: ignore
 except ImportError:  # pragma: no cover
-    TavilySearchAPIRetriever = None  # type: ignore
+    TavilySearchAPIWrapper = None  # type: ignore
 
 
 class DualRARetriever(BaseRetriever):
@@ -40,35 +44,47 @@ class ValidatedWebRetriever(BaseRetriever):
     def __init__(self, max_results: int = 4):
         super().__init__()
         object.__setattr__(self, "_max_results", max_results)
-        self._tavily: Optional[BaseRetriever] = None
-        if TavilySearchAPIRetriever is not None:
+        self._tavily: Optional[TavilySearchAPIWrapper] = None
+        if TavilySearchAPIWrapper is not None:
             try:
-                self._tavily = TavilySearchAPIRetriever(k=max_results * 3)
+                # Use the raw API wrapper from langchain-tavily to avoid interface drift.
+                self._tavily = TavilySearchAPIWrapper()
             except Exception:
                 self._tavily = None
 
-        self._fallback_corpus = [
-            Document(
-                page_content="海上城市依赖可再生能源时，如果没有储能与备用系统，连续阴影或风暴会导致全面停摆。",
-                metadata={"url": "https://example.com/energy"},
-            ),
-            Document(
-                page_content="Goodhart 定律提醒我们：激励指标一旦成为目标，就会被操纵，需要多维度约束。",
-                metadata={"url": "https://en.wikipedia.org/wiki/Goodhart%27s_law"},
-            ),
-            Document(
-                page_content="生态系统需要闭环维护，淡水或资源循环中断会在封闭环境里迅速放大风险。",
-                metadata={"url": "https://example.com/ecology"},
-            ),
-        ]
-
     def _fetch_web(self, query: str) -> List[Document]:
         if not self._tavily:
-            return []
+            raise RuntimeError("Tavily retriever not available; set TAVILY_API_KEY to enable web search.")
         try:
-            return self._tavily.invoke(query)
-        except Exception:
-            return []
+            payload = self._tavily.raw_results(
+                query=query,
+                max_results=self._max_results * 3,
+                search_depth="advanced",
+                include_domains=None,
+                exclude_domains=None,
+                include_answer=False,
+                include_raw_content=False,
+                include_images=False,
+                include_image_descriptions=False,
+                include_favicon=False,
+                topic="general",
+                time_range=None,
+                country=None,
+                auto_parameters=True,
+                start_date=None,
+                end_date=None,
+            )
+            results = payload.get("results", []) if isinstance(payload, dict) else []
+            docs: List[Document] = []
+            for item in results:
+                content = item.get("content") or item.get("title") or ""
+                url = item.get("url")
+                if not content:
+                    continue
+                docs.append(Document(page_content=content, metadata={"url": url}))
+            return docs
+        except Exception as exc:  # pragma: no cover - surfacing upstream
+            raise RuntimeError(f"Tavily retrieval failed: {exc}") from exc
 
     @staticmethod
     def _deduplicate(docs: List[Document]) -> List[Document]:
@@ -82,13 +98,9 @@ class ValidatedWebRetriever(BaseRetriever):
             unique_docs.append(doc)
         return unique_docs
 
-    def _fallback(self) -> List[Document]:
-        return self._fallback_corpus[: self._max_results]
-
     def _get_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
         docs = self._fetch_web(query)
         if not docs:
-            return self._fallback()
-
+            raise RuntimeError("Tavily returned no documents for the query.")
         docs = self._deduplicate(docs)
         return docs[: self._max_results]
