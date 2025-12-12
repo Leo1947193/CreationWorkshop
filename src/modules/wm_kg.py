@@ -15,6 +15,9 @@ from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from src.core.llm import get_llm_client
+from src.core.logging_utils import get_logger, log_event
+
+logger = get_logger("workshop.wmkg")
 
 os.environ.setdefault("CHROMADB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("CHROMADB_ANONYMIZED_TELEMETRY", "False")
@@ -267,9 +270,15 @@ def _llm_extract_entities(user_input: str) -> Optional[ExtractionPayload]:
         return None
 
 
-def analyze_input_for_gaps_and_conflicts(user_input: str, internal_collection) -> Dict[str, Any]:
+def analyze_input_for_gaps_and_conflicts(user_input: str, internal_collection, session_id: str | None = None) -> Dict[str, Any]:
     """Analyze user input to detect ontological gaps and potential conflicts."""
-
+    sid = session_id or "-"
+    log_event(
+        logger,
+        sid,
+        "wmkg_analyze_start",
+        text_len=len(user_input),
+    )
     sentences = _split_sentences(user_input)
     extracted_entities: List[Dict[str, Any]] = []
 
@@ -336,6 +345,15 @@ def analyze_input_for_gaps_and_conflicts(user_input: str, internal_collection) -
                     f"新的描述“{sentence}”可能与先前的规则“{existing_text}”矛盾 (实体: {metadata.get('entities')})"
                 )
 
+    log_event(
+        logger,
+        sid,
+        "wmkg_analyze_result",
+        gaps=len(gap_list),
+        conflicts=len(conflict_list),
+        axioms_extracted=len(axioms),
+        facts_extracted=len(facts),
+    )
     return {
         "gaps": gap_list,
         "conflicts": conflict_list,
@@ -349,6 +367,7 @@ def ingest_to_wm_kg(
     analysis_results: Dict[str, Any],
     version: int,
     source_id: str,
+    session_id: str | None = None,
 ) -> int:
     """Persist extracted axioms/facts to the internal KB."""
     extracted = analysis_results.get("extracted_data") or {}
@@ -388,9 +407,26 @@ def ingest_to_wm_kg(
         ids.append(f"fact-{uuid.uuid4().hex}")
 
     if not documents:
+        log_event(
+            logger,
+            session_id or "-",
+            "wmkg_ingest_skipped",
+            version=version,
+            source_id=source_id,
+        )
         return 0
 
     graph.collection.add(documents=documents, metadatas=metadatas, ids=ids)
+    log_event(
+        logger,
+        session_id or "-",
+        "wmkg_ingest_done",
+        count=len(documents),
+        axioms=len(axioms),
+        facts=len(facts),
+        version=version,
+        source_id=source_id,
+    )
     return len(documents)
 
 

@@ -29,7 +29,9 @@ interface AnalyzeResponse {
   top_defect?: DefectReport
 }
 
-const API_BASE = "http://localhost:8000"
+const API_BASE =
+  import.meta.env.VITE_API_BASE?.trim() ||
+  `${window.location.protocol}//${window.location.hostname}:8000`
 
 const ChatWindow = ({ messages }: { messages: Message[] }) => (
   <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">

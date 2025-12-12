@@ -4,8 +4,11 @@ from __future__ import annotations
 from textwrap import dedent
 
 from src.core.llm import get_llm_client
+from src.core.logging_utils import get_logger, invoke_with_logging, log_event
 from src.core.schemas import GlobalState
 from .wm_kg import WorldModelKnowledgeGraph, get_axioms_text
+
+logger = get_logger("workshop.cdng")
 
 final_story_prompt_template = """
 <role>
@@ -84,10 +87,23 @@ def run_cdng_module(state: GlobalState) -> GlobalState:
         defect_consequence=state.top_defect.long_term_consequence,
     )
 
+    log_event(
+        logger,
+        state.session_id,
+        "cdng_start",
+        defect_id=state.top_defect.defect_id,
+        risk=state.top_defect.risk_score,
+    )
+
     story = ""
     try:
         llm = get_llm_client(temperature=0.85)
-        response = llm.invoke(prompt)
+        response = invoke_with_logging(
+            llm,
+            prompt,
+            session_id=state.session_id,
+            label="CDNG_story",
+        )
         story = response.content if hasattr(response, "content") else str(response)
     except Exception:
         story = _synthesise_story(
@@ -99,4 +115,10 @@ def run_cdng_module(state: GlobalState) -> GlobalState:
 
     state.generated_story = story
     state.next_module_to_call = "IDLE"
+    log_event(
+        logger,
+        state.session_id,
+        "cdng_done",
+        story_len=len(story),
+    )
     return state

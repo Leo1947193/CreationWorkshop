@@ -6,34 +6,81 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, TypedDict
 
+import torch
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 from pydantic import BaseModel, Field
 
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+
 from src.core.llm import get_llm_client
+from src.core.logging_utils import get_logger, invoke_with_logging, log_event
 from src.core.schemas import DefectReport, GlobalState, WorldSpecificationSnapshot
 from .dual_rag import DualRARetriever, ValidatedWebRetriever
-from .wm_kg import WorldModelKnowledgeGraph
+from .wm_kg import EMBEDDING_MODEL_NAME, WorldModelKnowledgeGraph
+
+logger = get_logger("workshop.cda")
 
 
 class InternalAxiomRetriever(BaseRetriever):
-    """Thin retriever wrapper around the WM-KG axioms."""
+    """Retriever that uses dense search over axioms."""
 
-    def __init__(self, wmkg: WorldModelKnowledgeGraph):
+    def __init__(self, wmkg: WorldModelKnowledgeGraph, top_k: int = 5):
         super().__init__()
         self._wmkg = wmkg
+        self._top_k = top_k
+        self._vector_store = None
+        self._embeddings = None
+
+    def _ensure_embeddings(self):
+        if self._embeddings is None:
+            device = "cuda" if torch and torch.cuda.is_available() else "cpu"
+            self._embeddings = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL_NAME,
+                model_kwargs={"device": device},
+            )
+        return self._embeddings
+
+    def _ensure_vector_store(self):
+        if self._vector_store is None:
+            embeddings = self._ensure_embeddings()
+            self._vector_store = Chroma(
+                collection_name="internal_kb",
+                persist_directory=str(self._wmkg.persist_directory),
+                embedding_function=embeddings,
+                collection_metadata={"hnsw:space": "cosine"},
+            )
+        return self._vector_store
 
     def _get_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
-        docs = self._wmkg.list_axioms()
-        if not docs:
-            return []
-        lowered = query.lower()
-        matches = [
-            doc for doc in docs if any(token in doc.page_content.lower() for token in lowered.split())
-        ]
-        return matches[:5] if matches else docs[:5]
+        sid = getattr(run_manager, "session_id", None) or "-"
+        try:
+            store = self._ensure_vector_store()
+            retriever = store.as_retriever(search_kwargs={"k": self._top_k, "filter": {"type": "AXIOM"}})
+            candidates = retriever.invoke(query)
+            log_event(
+                logger,
+                sid,
+                "internal_axiom_dense",
+                query_len=len(query),
+                candidates=len(candidates),
+                k=self._top_k,
+                similarity="cosine",
+            )
+        except Exception:
+            candidates = []
+            log_event(logger, sid, "internal_axiom_dense_failed", query_len=len(query))
+
+        if not candidates:
+            # Fallback: return all axioms (truncated) if dense search fails.
+            docs = self._wmkg.list_axioms()
+            return docs[: self._top_k]
+
+        # Return dense results directly (cosine similarity) capped by top_k
+        return candidates[: self._top_k]
 
 
 class DefectCandidateModel(BaseModel):
@@ -114,6 +161,7 @@ class ThoughtNode:
 
 
 class RATTGraphState(TypedDict, total=False):
+    session_id: str
     world_spec: WorldSpecificationSnapshot
     dual_retriever: DualRARetriever
     axioms: List[str]
@@ -147,6 +195,7 @@ def _convert_candidate(model: DefectCandidateModel) -> DefectCandidate:
 
 
 def seed_problem_space(state: RATTGraphState) -> RATTGraphState:
+    sid = state.get("session_id", "-")
     llm = get_llm_client(temperature=0.15).with_structured_output(SeedThoughtResponse)
     axioms = state.get("axioms", [])
     prompt = (
@@ -162,8 +211,9 @@ def seed_problem_space(state: RATTGraphState) -> RATTGraphState:
         "3. path_summary：迄今为止的推理假设\n"
         "</task>"
     )
+    log_event(logger, sid, "cda_seed_start", axiom_count=len(axioms))
     try:
-        seed_response = llm.invoke(prompt)
+        seed_response = invoke_with_logging(llm, prompt, session_id=sid, label="CDA_seed")
         thoughts = seed_response.thoughts
     except Exception:
         # Fallback：如果 LLM 解析失败，创建一个默认节点
@@ -195,6 +245,7 @@ def seed_problem_space(state: RATTGraphState) -> RATTGraphState:
     state["active_nodes"] = active_nodes
     state["all_nodes"] = all_nodes
     state["iteration"] = 0
+    log_event(logger, sid, "cda_seed_result", seeds=len(active_nodes))
     return state
 
 
@@ -207,10 +258,12 @@ def generate_thoughts(state: RATTGraphState) -> RATTGraphState:
         state["active_nodes"] = []
         return state
 
+    sid = state.get("session_id", "-")
     llm = get_llm_client(temperature=0.3).with_structured_output(GeneratedThoughtResponse)
     axioms_text = _format_axioms(state.get("axioms", []), limit=20)
     new_nodes: List[ThoughtNode] = []
     all_nodes = state.get("all_nodes", {})
+    log_event(logger, sid, "cda_generate_start", parents=len(expandables))
 
     for node in expandables:
         prompt = (
@@ -229,7 +282,7 @@ def generate_thoughts(state: RATTGraphState) -> RATTGraphState:
             "</task>"
         )
         try:
-            resp = llm.invoke(prompt)
+            resp = invoke_with_logging(llm, prompt, session_id=sid, label="CDA_generate")
             children = resp.thoughts
         except Exception:
             children = []
@@ -255,11 +308,13 @@ def generate_thoughts(state: RATTGraphState) -> RATTGraphState:
 
     state["active_nodes"] = new_nodes
     state["all_nodes"] = all_nodes
+    log_event(logger, sid, "cda_generate_result", children=len(new_nodes), total_nodes=len(all_nodes))
     return state
 
 
 def retrieve_context(state: RATTGraphState) -> RATTGraphState:
     retriever = state["dual_retriever"]
+    sid = state.get("session_id", "-")
     for node in state.get("active_nodes", []):
         query = node.focus_question or node.path_summary
         try:
@@ -276,12 +331,21 @@ def retrieve_context(state: RATTGraphState) -> RATTGraphState:
                 node.context_internal.append(text)
             else:
                 node.context_external.append(text)
+        log_event(
+            logger,
+            sid,
+            "cda_retrieve_node",
+            node_id=node.id,
+            internal=len(node.context_internal),
+            external=len(node.context_external),
+        )
     return state
 
 
 def judge_thought(state: RATTGraphState) -> RATTGraphState:
     llm = get_llm_client(temperature=0.15).with_structured_output(JudgedThoughtModel)
     axioms = state.get("axioms", [])
+    sid = state.get("session_id", "-")
     # 每一轮最多裁判若干个节点，避免调用次数失控
     max_judged_per_iter = 6
     for node in state.get("active_nodes", [])[:max_judged_per_iter]:
@@ -308,7 +372,7 @@ def judge_thought(state: RATTGraphState) -> RATTGraphState:
             "</task>"
         )
         try:
-            judged = llm.invoke(prompt)
+            judged = invoke_with_logging(llm, prompt, session_id=sid, label="CDA_judge")
         except Exception:
             judged = JudgedThoughtModel(
                 status="SAFE",
@@ -321,6 +385,15 @@ def judge_thought(state: RATTGraphState) -> RATTGraphState:
         node.score = judged.score
         for cand in judged.defect_candidates:
             node.defect_candidates.append(_convert_candidate(cand))
+        log_event(
+            logger,
+            sid,
+            "cda_judge_node",
+            node_id=node.id,
+            status=node.status,
+            score=node.score,
+            defects=len(node.defect_candidates),
+        )
     return state
 
 
@@ -329,6 +402,7 @@ def evaluate_and_prune(state: RATTGraphState) -> RATTGraphState:
     next_nodes: List[ThoughtNode] = []
     max_depth = state.get("max_depth", 3)
     max_nodes = state.get("max_nodes", 40)
+    sid = state.get("session_id", "-")
 
     for node in state.get("active_nodes", []):
         final_defects.extend(node.defect_candidates)
@@ -345,6 +419,14 @@ def evaluate_and_prune(state: RATTGraphState) -> RATTGraphState:
     state["final_defects"] = final_defects
     state["active_nodes"] = next_nodes
     state["iteration"] = state.get("iteration", 0) + 1
+    log_event(
+        logger,
+        sid,
+        "cda_prune",
+        kept=len(next_nodes),
+        defects=len(final_defects),
+        iteration=state["iteration"],
+    )
     return state
 
 
@@ -353,6 +435,7 @@ def generate_final_report(state: RATTGraphState) -> RATTGraphState:
     if not defects:
         return state
 
+    sid = state.get("session_id", "-")
     llm = get_llm_client(temperature=0.2).with_structured_output(FinalDefectResponse)
     serialized = []
     for defect in defects[:20]:
@@ -375,7 +458,7 @@ def generate_final_report(state: RATTGraphState) -> RATTGraphState:
         f"<candidates>{json.dumps(serialized, ensure_ascii=False)}</candidates>"
     )
     try:
-        final_response = llm.invoke(prompt)
+        final_response = invoke_with_logging(llm, prompt, session_id=sid, label="CDA_final_report")
         merged = final_response.defects
     except Exception:
         merged = []
@@ -393,6 +476,7 @@ def generate_final_report(state: RATTGraphState) -> RATTGraphState:
             for item in merged
         ]
         state["final_scores"] = {item.id: (item.likelihood, item.severity) for item in merged}
+    log_event(logger, sid, "cda_final_report", merged=len(state.get("final_defects", [])))
     return state
 
 
@@ -447,6 +531,13 @@ def run_cda_module(state: GlobalState) -> GlobalState:
     state.world_spec_snapshot = state.world_spec_snapshot or _build_world_snapshot(state, wmkg)
     axiom_docs = wmkg.list_axioms()
     axioms = [doc.page_content for doc in axiom_docs]
+    log_event(
+        logger,
+        state.session_id,
+        "cda_start",
+        axiom_count=len(axioms),
+        world_version=state.current_world_version,
+    )
 
     if not axioms:
         state.defect_reports = []
@@ -458,6 +549,7 @@ def run_cda_module(state: GlobalState) -> GlobalState:
     dual_retriever = DualRARetriever(InternalAxiomRetriever(wmkg), ValidatedWebRetriever())
 
     ratt_state: RATTGraphState = {
+        "session_id": state.session_id,
         "world_spec": state.world_spec_snapshot,
         "dual_retriever": dual_retriever,
         "axioms": axioms,
@@ -495,10 +587,19 @@ def run_cda_module(state: GlobalState) -> GlobalState:
         state.top_defect = None
         state.generated_story = "当前规则下未发现明确缺陷；如需深入，请继续在 SEE 中添加关键机制/约束。"
         state.next_module_to_call = "IDLE"
+        log_event(logger, state.session_id, "cda_no_defect")
         return state
 
     defect_reports.sort(key=lambda d: d.risk_score, reverse=True)
     state.defect_reports = defect_reports
     state.top_defect = defect_reports[0]
     state.next_module_to_call = "CDNG"
+    log_event(
+        logger,
+        state.session_id,
+        "cda_result",
+        defects=len(defect_reports),
+        top_defect=state.top_defect.defect_id,
+        top_risk=state.top_defect.risk_score,
+    )
     return state

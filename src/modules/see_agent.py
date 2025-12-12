@@ -6,9 +6,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 
-from src.core.schemas import GlobalState
 from src.core.llm import get_llm_client, history_to_text
+from src.core.logging_utils import get_logger, invoke_with_logging, log_event
+from src.core.schemas import GlobalState
 from .wm_kg import WorldModelKnowledgeGraph, analyze_input_for_gaps_and_conflicts, ingest_to_wm_kg
+
+logger = get_logger("workshop.see")
 
 GAP_PROMPT = ChatPromptTemplate.from_template(
     """<role>
@@ -60,6 +63,13 @@ CONFLICT_PROMPT = ChatPromptTemplate.from_template(
 def add_user_message_to_state(state: GlobalState) -> GlobalState:
     if state.current_user_input:
         state.conversation_history.append(HumanMessage(content=state.current_user_input))
+        log_event(
+            logger,
+            state.session_id,
+            "see_add_user_message",
+            content_len=len(state.current_user_input),
+            history_len=len(state.conversation_history),
+        )
     return state
 
 
@@ -69,16 +79,30 @@ def call_kg_parser(state: GlobalState) -> GlobalState:
         return state
 
     wmkg = WorldModelKnowledgeGraph(state.internal_kb_path)
-    analysis = analyze_input_for_gaps_and_conflicts(state.current_user_input, wmkg.collection)
+    analysis = analyze_input_for_gaps_and_conflicts(
+        state.current_user_input,
+        wmkg.collection,
+        session_id=state.session_id,
+    )
     ingestion_count = ingest_to_wm_kg(
         graph=wmkg,
         analysis_results=analysis,
         version=state.current_world_version + 1,
         source_id=f"user_input_turn_{len(state.conversation_history)+1}",
+        session_id=state.session_id,
     )
     if ingestion_count:
         state.current_world_version += 1
     state.analysis_insights = analysis
+    log_event(
+        logger,
+        state.session_id,
+        "see_wmkg_analysis",
+        gaps=len(analysis.get("gaps", [])),
+        conflicts=len(analysis.get("conflicts", [])),
+        ingested=ingestion_count,
+        world_version=state.current_world_version,
+    )
     return state
 
 
@@ -119,7 +143,12 @@ def call_socratic_llm(state: GlobalState) -> GlobalState:
             conflict_list="\n".join(conflicts) or "（暂无冲突）",
         )
         try:
-            llm_output = llm.invoke(formatted)
+            llm_output = invoke_with_logging(
+                llm,
+                formatted,
+                session_id=state.session_id,
+                label="SEE_Socratic",
+            )
             response = getattr(llm_output, "content", "") or str(llm_output)
         except Exception:
             response = ""
@@ -127,6 +156,14 @@ def call_socratic_llm(state: GlobalState) -> GlobalState:
         response = _render_conflict_prompt(conflicts) if conflicts else _render_gap_prompt(gaps, len(state.conversation_history))
 
     state.conversation_history.append(AIMessage(content=response))
+    log_event(
+        logger,
+        state.session_id,
+        "see_ai_response",
+        response_len=len(response),
+        conflicts=len(conflicts),
+        gaps=len(gaps),
+    )
     return state
 
 

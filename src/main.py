@@ -6,10 +6,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from src.core.logging_utils import configure_logging, get_logger
 from src.core.schemas import DefectReport, GlobalState
 from src.core.state_manager import load_state, save_state
 from src.modules.main_graph import execute_main_graph
 from src.modules.see_agent_v2 import SEE_GRAPH_V2
+
+# Configure logging as early as possible
+configure_logging()
+logger = get_logger(__name__)
 
 
 class SessionInitResponse(BaseModel):
@@ -61,6 +66,7 @@ async def session_init() -> SessionInitResponse:
     session_id = str(uuid.uuid4())
     state = load_state(session_id)
     save_state(state)
+    logger.info("session initialized", extra={"session_id": session_id})
     return SessionInitResponse(session_id=session_id)
 
 
@@ -84,6 +90,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     state.current_user_input = request.message
     state.socratic_question_needed = True
     state.next_module_to_call = "SEE"
+    logger.info(
+        "chat received via SEE standard",
+        extra={"session_id": request.session_id, "message_len": len(request.message)},
+    )
 
     updated_state = execute_main_graph(state)
     save_state(updated_state)
@@ -95,6 +105,14 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         elif isinstance(msg, dict) and msg.get("type") == "ai":
             ai_messages.append(msg.get("content", ""))
     response_text = ai_messages[-1] if ai_messages else "（尚未生成 AI 回复）"
+    logger.info(
+        "chat response produced",
+        extra={
+            "session_id": request.session_id,
+            "response_len": len(response_text),
+            "history_len": len(updated_state.conversation_history),
+        },
+    )
 
     return ChatResponse(
         session_id=request.session_id,
@@ -109,6 +127,10 @@ async def chat_simple_endpoint(request: ChatRequest) -> ChatResponse:
     state = _ensure_session_state(request.session_id)
     state.current_user_input = request.message
     state.socratic_question_needed = True
+    logger.info(
+        "chat received via SEE simple",
+        extra={"session_id": request.session_id, "message_len": len(request.message)},
+    )
 
     updated_state_raw = SEE_GRAPH_V2.invoke(state)
     updated_state = _coerce_global_state(updated_state_raw)
@@ -121,6 +143,14 @@ async def chat_simple_endpoint(request: ChatRequest) -> ChatResponse:
         elif isinstance(msg, dict) and msg.get("type") == "ai":
             ai_messages.append(msg.get("content", ""))
     response_text = ai_messages[-1] if ai_messages else "（尚未生成 AI 回复）"
+    logger.info(
+        "chat_simple response produced",
+        extra={
+            "session_id": request.session_id,
+            "response_len": len(response_text),
+            "history_len": len(updated_state.conversation_history),
+        },
+    )
 
     return ChatResponse(
         session_id=request.session_id,
@@ -134,9 +164,18 @@ async def analyze_endpoint(request: AnalyzeRequest) -> AnalyzeResponse:
     state = _ensure_session_state(request.session_id)
     state.current_user_input = None
     state.next_module_to_call = "CDA"
+    logger.info("analyze requested", extra={"session_id": request.session_id})
 
     updated_state = execute_main_graph(state)
     save_state(updated_state)
+    logger.info(
+        "analyze completed",
+        extra={
+            "session_id": request.session_id,
+            "story_len": len(updated_state.generated_story or ""),
+            "top_defect": getattr(updated_state.top_defect, "defect_id", None),
+        },
+    )
 
     return AnalyzeResponse(
         session_id=request.session_id,

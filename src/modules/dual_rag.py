@@ -7,8 +7,20 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
+from src.core.logging_utils import get_logger, log_event
+
 # Ensure .env is loaded so Tavily picks up the API key when running via REPL/scripts.
 load_dotenv()
+
+logger = get_logger("workshop.dual_rag")
+
+
+def _clip(text: str, limit: int = 200) -> str:
+    if len(text) <= limit:
+        return text
+    head = text[: limit // 2]
+    tail = text[-limit // 2 :]
+    return f"{head} ...[+{len(text) - limit} chars]... {tail}"
 
 try:
     from langchain_tavily._utilities import TavilySearchAPIWrapper  # type: ignore
@@ -56,6 +68,7 @@ class ValidatedWebRetriever(BaseRetriever):
         if not self._tavily:
             raise RuntimeError("Tavily retriever not available; set TAVILY_API_KEY to enable web search.")
         try:
+            log_event(logger, "-", "tavily_query_start", query=_clip(query, 200))
             payload = self._tavily.raw_results(
                 query=query,
                 max_results=self._max_results * 3,
@@ -82,8 +95,10 @@ class ValidatedWebRetriever(BaseRetriever):
                 if not content:
                     continue
                 docs.append(Document(page_content=content, metadata={"url": url}))
+            log_event(logger, "-", "tavily_query_success", query=_clip(query, 200), results=len(docs))
             return docs
         except Exception as exc:  # pragma: no cover - surfacing upstream
+            log_event(logger, "-", "tavily_query_error", query=_clip(query, 200), error=str(exc))
             raise RuntimeError(f"Tavily retrieval failed: {exc}") from exc
 
     @staticmethod
@@ -99,8 +114,11 @@ class ValidatedWebRetriever(BaseRetriever):
         return unique_docs
 
     def _get_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
+        log_event(logger, "-", "tavily_fetch_start", query=_clip(query, 200))
         docs = self._fetch_web(query)
         if not docs:
             raise RuntimeError("Tavily returned no documents for the query.")
         docs = self._deduplicate(docs)
-        return docs[: self._max_results]
+        final_docs = docs[: self._max_results]
+        log_event(logger, "-", "tavily_fetch_done", query=_clip(query, 200), returned=len(final_docs))
+        return final_docs
