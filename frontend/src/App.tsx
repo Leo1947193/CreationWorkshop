@@ -33,6 +33,20 @@ const API_BASE =
   import.meta.env.VITE_API_BASE?.trim() ||
   `${window.location.protocol}//${window.location.hostname}:8000`
 
+const makeId = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `id-${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+async function safeJson(res: Response) {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw new Error(`解析后端响应失败（${res.url}）: ${text.slice(0, 500)}`)
+  }
+}
+
 const ChatWindow = ({ messages }: { messages: Message[] }) => (
   <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
     {messages.length === 0 && (
@@ -143,9 +157,10 @@ function App() {
   const initSession = useCallback(async () => {
     const res = await fetch(`${API_BASE}/api/v1/session/init`, { method: "POST" })
     if (!res.ok) {
-      throw new Error("session init failed")
+      const text = await res.text()
+      throw new Error(`session init failed: ${res.status} ${text}`)
     }
-    const data = await res.json()
+    const data = (await safeJson(res)) as ChatResponse
     setSessionId(data.session_id)
     // reset local buffers
     setMessages([])
@@ -156,7 +171,7 @@ function App() {
   useEffect(() => {
     initSession().catch((err) => {
       console.error(err)
-      setError("无法初始化会话，请确认后端是否已启动。")
+      setError(`无法初始化会话：${String(err)}`)
     })
   }, [initSession])
 
@@ -180,13 +195,14 @@ function App() {
           body: JSON.stringify({ session_id: sessionId, message }),
         })
         if (!res.ok) {
-          throw new Error("Chat endpoint failed")
+          const text = await res.text()
+          throw new Error(`Chat endpoint failed: ${res.status} ${text}`)
         }
-        const data = (await res.json()) as ChatResponse
+        const data = (await safeJson(res)) as ChatResponse
         setMessages((prev) => [
           ...prev,
-          { id: crypto.randomUUID(), role: "user", content: message },
-          { id: crypto.randomUUID(), role: "ai", content: data.response },
+          { id: makeId(), role: "user", content: message },
+          { id: makeId(), role: "ai", content: data.response },
         ])
       } catch (err) {
         console.error(err)
@@ -209,9 +225,10 @@ function App() {
         body: JSON.stringify({ session_id: sessionId }),
       })
       if (!res.ok) {
-        throw new Error("Analyze endpoint failed")
+        const text = await res.text()
+        throw new Error(`Analyze endpoint failed: ${res.status} ${text}`)
       }
-      const data = (await res.json()) as AnalyzeResponse
+      const data = (await safeJson(res)) as AnalyzeResponse
       setStory(data.story)
       setTopDefect(data.top_defect)
     } catch (err) {
