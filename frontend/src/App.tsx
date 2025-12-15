@@ -149,7 +149,7 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [story, setStory] = useState<string | undefined>()
   const [topDefect, setTopDefect] = useState<DefectReport | undefined>()
-  const [seeVariant, setSeeVariant] = useState<"default" | "simple">("default")
+  const [seeVariant] = useState<"simple">("simple")
   const [loading, setLoading] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -247,27 +247,6 @@ function App() {
         <p className="mt-2 text-sm text-slate-500">
           与 SEE 对话来精炼你的世界，然后让 CDA + CDNG 揭示潜在缺陷，并以故事的形式呈现。
         </p>
-        <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-slate-100 p-1 text-xs text-slate-600">
-          <span className="px-2">SEE 版本</span>
-          <button
-            type="button"
-            onClick={() => setSeeVariant("default")}
-            className={`rounded-full px-3 py-1 ${
-              seeVariant === "default" ? "bg-white text-slate-900 shadow" : "text-slate-500"
-            }`}
-          >
-            标准（含空白/冲突分析）
-          </button>
-          <button
-            type="button"
-            onClick={() => setSeeVariant("simple")}
-            className={`rounded-full px-3 py-1 ${
-              seeVariant === "simple" ? "bg-white text-slate-900 shadow" : "text-slate-500"
-            }`}
-          >
-            简化（仅历史 + 当前输入）
-          </button>
-        </div>
         <div className="mt-2 flex items-center gap-3 text-xs text-slate-500">
           <span className="rounded-full bg-slate-100 px-3 py-1">Session: {sessionId || "未初始化"}</span>
           <button

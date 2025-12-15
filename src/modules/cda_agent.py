@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from sentence_transformers import CrossEncoder
 
 from src.core.llm import get_llm_client
 from src.core.logging_utils import get_logger, invoke_with_logging, log_event
@@ -26,14 +27,16 @@ logger = get_logger("workshop.cda")
 
 
 class InternalAxiomRetriever(BaseRetriever):
-    """Retriever that uses dense search over axioms."""
+    """Retriever that uses dense search + rerank over axioms."""
 
-    def __init__(self, wmkg: WorldModelKnowledgeGraph, top_k: int = 5):
+    def __init__(self, wmkg: WorldModelKnowledgeGraph, top_k: int = 20, rerank_top: int = 15):
         super().__init__()
         self._wmkg = wmkg
         self._top_k = top_k
+        self._rerank_top = rerank_top
         self._vector_store = None
         self._embeddings = None
+        self._reranker = None
 
     def _ensure_embeddings(self):
         if self._embeddings is None:
@@ -54,6 +57,15 @@ class InternalAxiomRetriever(BaseRetriever):
                 collection_metadata={"hnsw:space": "cosine"},
             )
         return self._vector_store
+
+    def _ensure_reranker(self):
+        if self._reranker is None:
+            device = "cuda" if torch and torch.cuda.is_available() else "cpu"
+            self._reranker = CrossEncoder(
+                "BAAI/bge-reranker-v2.5-gemma2-lightweight",
+                device=device,
+            )
+        return self._reranker
 
     def _get_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
         sid = getattr(run_manager, "session_id", None) or "-"
@@ -77,10 +89,36 @@ class InternalAxiomRetriever(BaseRetriever):
         if not candidates:
             # Fallback: return all axioms (truncated) if dense search fails.
             docs = self._wmkg.list_axioms()
-            return docs[: self._top_k]
+            return docs[: self._rerank_top]
 
-        # Return dense results directly (cosine similarity) capped by top_k
-        return candidates[: self._top_k]
+        reranker = None
+        try:
+            reranker = self._ensure_reranker()
+        except Exception:
+            reranker = None
+            log_event(logger, sid, "internal_axiom_reranker_init_failed", query_len=len(query))
+
+        if reranker:
+            pairs = [(query, doc.page_content) for doc in candidates]
+            try:
+                scores = reranker.score(pairs)
+            except Exception:
+                scores = []
+                log_event(logger, sid, "internal_axiom_rerank_failed", query_len=len(query))
+            if scores:
+                ranked = sorted(zip(candidates, scores), key=lambda item: item[1], reverse=True)
+                top_docs = [doc for doc, _score in ranked[: self._rerank_top]]
+                log_event(
+                    logger,
+                    sid,
+                    "internal_axiom_reranked",
+                    taken=len(top_docs),
+                    original=len(candidates),
+                )
+                return top_docs
+
+        # If reranker not available or failed, just truncate dense results
+        return candidates[: self._rerank_top]
 
 
 class DefectCandidateModel(BaseModel):
