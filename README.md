@@ -133,7 +133,7 @@ cp .env.example .env
 The important variables are:
 
 - `LLM_MODEL`  
-  OpenRouter model slug to use for *all* LLM calls, e.g.:
+  OpenRouter model slug for *all* LLM calls, e.g.:
   - `openrouter/openai/gpt-5.1-chat`
   - `google/gemini-pro`
   - `meta-llama/llama-3.1-70b-instruct`
@@ -148,11 +148,12 @@ The important variables are:
   Used by OpenRouter for attribution and dashboard display.
 
 - `EMBEDDING_MODEL`  
-  The sentence‑transformer model name, e.g. `BAAI/bge-large-zh-v1.5`.
+  Sentence‑transformer model name for Chroma, e.g. `BAAI/bge-large-zh-v1.5`.
 
-- `TAVILY_API_KEY` (optional but recommended if you want web retrieval).
+- `TAVILY_API_KEY`  
+  **Required** for `/api/v1/analyze` (CDA external web retrieval). If missing, Tavily calls will fail and CDA will raise.
 
-> **Note:** The backend expects `LLM_MODEL` and `OPENROUTER_API_KEY` to be present; if they are missing it will raise at startup.
+> **Note:** Backend will raise at startup if `LLM_MODEL` or `OPENROUTER_API_KEY` is missing.
 
 ---
 
@@ -184,6 +185,8 @@ npm run dev -- --host 0.0.0.0
 Vite will show the dev server URL, typically `http://localhost:5173`.
 
 Open that URL in your browser; the UI will call FastAPI on port 8000.
+
+> Frontend API base defaults to `http(s)://<current-host>:8000`. If you need to override (e.g., accessing from Windows to WSL), set `VITE_API_BASE`, e.g. `VITE_API_BASE=http://172.x.x.x:8000 npm run dev -- --host 0.0.0.0 --port 5173`.
 
 ---
 
@@ -248,6 +251,8 @@ All endpoints are JSON‑based and live under `src/main.py`:
       "conversation_length": 7
     }
     ```
+- `POST /api/v1/chat_simple`
+  - Same shape as `/chat`, but the Socratic prompt only sees history + current input (used by the current frontend).
 
 - `POST /api/v1/analyze`
   - Request: `{"session_id": "..."}`  
@@ -302,10 +307,10 @@ For profiling, the repo supports using tools like `pyinstrument` or `scalene` by
   - You can plug in any OpenRouter model by changing `LLM_MODEL`.
   - Embedding model is fully configurable via `EMBEDDING_MODEL`.
   - CDA RATT prompts can be refined to steer what kinds of defects are surfaced (while avoiding hard‑coded patterns).
+  - Internal KB retrieval uses Chroma with cosine similarity (HNSW) and reranks via `BAAI/bge-reranker-v2.5-gemma2-lightweight` (top 20 -> top 15); models will download on first use.
 
 ---
 
 ## License
 
 This project is an experimental prototype. Add your preferred license here (e.g., MIT, Apache‑2.0) before publishing publicly.
-
